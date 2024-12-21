@@ -1,0 +1,4 @@
+dist
+src/index.js
+src/index.ts
+node_modules
