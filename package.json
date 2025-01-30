@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@jest/globals": "^29.7.0",
-    "@mysten/sui": "^1.17.0",
+    "@mysten/sui": "^1.21.0",
     "@mysten/sui.js": "^0.54.1",
     "@mysten/wallet-standard": "^0.13.19",
     "lodash": "^4.17.21",
