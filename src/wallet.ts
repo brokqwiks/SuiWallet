@@ -27,7 +27,7 @@ interface ExecuteTransaction {
     publicKey: Ed25519PublicKey
 }
 
-class Account implements WalletAccount {
+export class Account implements WalletAccount {
     address: string;
     publicKey: ReadonlyUint8Array;
     chains: IdentifierArray;
@@ -62,7 +62,7 @@ export default class UDO_Wallet implements Wallet {
     public accounts: readonly WalletAccount[] = [];
     private currentAccount: Account | null = null;
     private currentChain = SUI_DEVNET_CHAIN
-    private client: SuiClient = new SuiClient({url: getFullnodeUrl("devnet")});
+    private client: SuiClient;
 
     get version(): "1.0.0" {
         return "1.0.0";
@@ -80,10 +80,26 @@ export default class UDO_Wallet implements Wallet {
         return [SUI_DEVNET_CHAIN, SUI_LOCALNET_CHAIN, SUI_TESTNET_CHAIN, SUI_MAINNET_CHAIN];
     }
 
-    protected checkAccount() {
-        if(!this.currentAccount){
-            throw new Error("No selected account error");
-        }
+    constructor() {
+        this.client = new SuiClient({
+            url: getFullnodeUrl(this.networkMap[SUI_DEVNET_CHAIN])
+        });
+    }
+
+    private networkMap = {
+        [SUI_DEVNET_CHAIN]: "devnet" as const,
+        [SUI_LOCALNET_CHAIN]: "localnet" as const,
+        [SUI_TESTNET_CHAIN]: "testnet" as const,
+        [SUI_MAINNET_CHAIN]: "mainnet" as const
+    }
+
+    private updateClient(network: keyof typeof this.networkMap) {
+        const networkType = this.networkMap[network];
+        if (!networkType) throw new Error("Unsupported network");
+    
+        this.client = new SuiClient({
+            url: getFullnodeUrl(networkType)
+        });
     }
 
     private signPersonalMessage: SuiSignPersonalMessageMethod = async ({message}) => {
@@ -93,52 +109,33 @@ export default class UDO_Wallet implements Wallet {
             throw new Error("Failed signature");
         }
 
-        return {
-            bytes: Buffer.from(message).toString("base64"),
-            signature: Buffer.from(signatureMessage.signature).toString("base64")
-        }
+        return signatureMessage;
     }
 
 
     private signTransaction: SuiSignTransactionMethod = async ({transaction}) => {
         const txJson = await transaction.toJSON();
-
         const tx = Transaction.from(txJson);
-
         const txBytes = await tx.build({client: this.client});
         const signatureTx = await this.currentAccount?.getKeypair().signTransaction(txBytes);
-
-        console.log(await tx.getData())
-
         if(!signatureTx){
-            throw new Error("Failed signature tx")
+            throw new Error("Error signature")
         }
-        return {
-            bytes: Buffer.from(await transaction.toJSON()).toString("base64"),
-            signature: Buffer.from(signatureTx?.signature).toString("base64")
-        }
+
+        this.verifyTransaction(txBytes, signatureTx.signature);
+        return signatureTx!
     }
 
     private signAndExecuteTransaction: SuiSignAndExecuteTransactionMethod = async ({transaction}) => {
         const txJson = await transaction.toJSON();
-
         const tx = Transaction.from(txJson);
-
         const txBytes = await tx.build({client: this.client});
         const signature = await this.currentAccount?.getKeypair().signTransaction(txBytes);
-
-        console.log(await tx.getData())
-
         if(!signature){
-            throw new Error("Failed signature tx")
-        }
-
-        const signatureBytes = new Uint8Array(1 + signature.signature.length);
-
-        const verifyTx = await this.currentAccount?.getKeypair().getPublicKey().verifyTransaction(txBytes, await signature.signature);
-        if(!verifyTx){
             throw new Error("Failed verify transaction");
         }
+
+        this.verifyTransaction(txBytes, signature.signature)
 
         let res = await this.client.executeTransactionBlock({
             transactionBlock: txBytes,
@@ -168,9 +165,7 @@ export default class UDO_Wallet implements Wallet {
         const tx_bytes = await tx.build({client: this.client})
         const serializedSignature = await this.currentAccount.getKeypair().signTransaction(tx_bytes);
         
-        if(!this.currentAccount.getKeypair().getPublicKey().verifyTransaction(tx_bytes, serializedSignature.signature)){
-            throw new Error("Error verify transaction");
-        }
+        this.verifyTransaction(tx_bytes, serializedSignature.signature);
 
         return {
             bytes: Buffer.from(tx_bytes).toString("base64"),
@@ -195,9 +190,7 @@ export default class UDO_Wallet implements Wallet {
         const tx_bytes = await tx.build({client: this.client})
         const serializedSignature = await this.currentAccount.getKeypair().signTransaction(tx_bytes);
         
-        if(!this.currentAccount.getKeypair().getPublicKey().verifyTransaction(tx_bytes, serializedSignature.signature)){
-            throw new Error("Error verify transaction");
-        }
+        this.verifyTransaction(tx_bytes, serializedSignature.signature)
 
         let resultTx = await this.client.executeTransactionBlock({
             transactionBlock: tx_bytes,
@@ -209,13 +202,14 @@ export default class UDO_Wallet implements Wallet {
             signature: Buffer.from(serializedSignature.signature).toString("base64"),
             publicKey: this.currentAccount.getKeypair().getPublicKey()
         }
-
     }
 
-    private reportTransactionEffects: SuiReportTransactionEffectsMethod = async ({effects}) => {
-        //report
-    }
 
+    private verifyTransaction(txBytes: Uint8Array, signature: Uint8Array | string) {
+        if (!this.currentAccount?.getKeypair().getPublicKey().verifyTransaction(txBytes, signature)) {
+            throw new Error("Transaction verification failed");
+        }
+    }
 
     addAccount(privateKey: string): void {
         const account = this.createAccountFromPrivateKey(privateKey);
@@ -241,8 +235,21 @@ export default class UDO_Wallet implements Wallet {
         }
     }
 
-    changeChain(chain: string): void {
+    changeChain(chain: keyof typeof this.networkMap): void {
+        if (!(chain in this.networkMap)) {
+            throw new Error("Unsupported chain");
+        }
+        
         this.currentChain = chain;
+        this.updateClient(chain);
+        
+        this.walletAccounts.forEach(acc => {
+            acc.chains = [chain];
+        });
+    }
+
+    public getCurrentNetwork(): string {
+        return this.currentChain;
     }
 
     private createAccountFromPrivateKey(privateKey: string):  Account {
@@ -266,8 +273,7 @@ export default class UDO_Wallet implements Wallet {
         return {
             "sui_signPersonalMessage": this.signPersonalMessage,
             "sui_signTransaction": this.signTransaction,
-            "sui_signAndExecuteTransaction": this.signAndExecuteTransaction,
-            "sui_reportTransactionEffects": this.reportTransactionEffects,
+            "sui_signAndExecuteTransaction": this.signAndExecuteTransaction
         };
     }
 }
